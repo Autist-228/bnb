@@ -6,6 +6,11 @@ load_dotenv()
 
 
 BSC_PUBLIC_NODES = [
+    "https://bsc-dataseed.binance.org",
+    "https://bsc.drpc.org",
+    "https://1rpc.io/bnb",
+    "https://rpc.ankr.com/bsc",
+    "https://bsc.meowrpc.com",
     "https://bsc.publicnode.com",
     "https://bsc-dataseed1.binance.org",
     "https://bsc-dataseed2.binance.org",
@@ -42,6 +47,20 @@ FACTORY_ABI = [
             {"name": "tokenB", "type": "address"},
         ],
         "name": "getPair",
+        "outputs": [{"name": "pair", "type": "address"}],
+        "type": "function",
+    },
+    {
+        "constant": True,
+        "inputs": [],
+        "name": "allPairsLength",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "type": "function",
+    },
+    {
+        "constant": True,
+        "inputs": [{"name": "", "type": "uint256"}],
+        "name": "allPairs",
         "outputs": [{"name": "pair", "type": "address"}],
         "type": "function",
     },
@@ -182,7 +201,7 @@ ERC20_ABI = [
 @dataclass
 class BotConfig:
     bsc_wss_url: str = os.getenv("BSC_WSS_URL", "wss://bsc-ws-node.nariox.org:443")
-    bsc_https_url: str = os.getenv("BSC_HTTPS_URL", "https://bsc.publicnode.com")
+    bsc_https_url: str = os.getenv("BSC_HTTPS_URL", "https://bsc-dataseed.binance.org")
     private_key: str = os.getenv("PRIVATE_KEY", "")
     wallet_address: str = os.getenv("WALLET_ADDRESS", "")
 
