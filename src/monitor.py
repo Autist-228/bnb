@@ -99,48 +99,40 @@ class PairMonitor:
         logger.info("Switched to BSC node: %s", new_url)
 
     async def _poll_loop(self):
-        consecutive_fails = 0
+        poll_sec = max(self.config.poll_interval_ms / 1000.0, 5.0)
         while self._running:
             try:
                 current_block = await self.w3.eth.block_number
-                if current_block > self._last_block:
-                    gap = current_block - self._last_block
-                    if gap > 50:
-                        self._last_block = current_block - 10
+                if current_block <= self._last_block:
+                    await asyncio.sleep(poll_sec)
+                    continue
 
-                    ok = await self._scan_blocks(self._last_block + 1, current_block)
-                    if ok:
-                        self._last_block = current_block
-                        consecutive_fails = 0
-                        self._rate_limit_count = 0
-                    else:
-                        consecutive_fails += 1
-                        self._rate_limit_count += 1
-                        if self._rate_limit_count >= 3:
-                            self._rotate_node()
-                            self._rate_limit_count = 0
-                        cooldown = min(3.0 * consecutive_fails, 15.0)
-                        await asyncio.sleep(cooldown)
-                        if consecutive_fails >= 2:
-                            try:
-                                current_block = await self.w3.eth.block_number
-                            except Exception:
-                                pass
-                            self._last_block = current_block
-                            consecutive_fails = 0
-                        continue
+                gap = current_block - self._last_block
+                if gap > 100:
+                    self._last_block = current_block - 20
+                    gap = current_block - self._last_block
+
+                ok = await self._scan_blocks(self._last_block + 1, current_block)
+                if ok:
+                    self._last_block = current_block
+                    self._rate_limit_count = 0
+                else:
+                    self._rate_limit_count += 1
+                    self._rotate_node()
+                    self._last_block = current_block
+                    await asyncio.sleep(poll_sec * 2)
+                    continue
             except Exception as e:
                 msg = str(e).lower()
-                is_rate_limit = any(s in msg for s in ["limit", "32005", "429", "too many"])
-                if is_rate_limit:
+                if any(s in msg for s in ["limit", "32005", "429", "too many"]):
                     self._rotate_node()
-                    await asyncio.sleep(5.0)
                 else:
                     logger.error("Poll error: %s", e)
                     self._rotate_node()
-                    await asyncio.sleep(3.0)
+                await asyncio.sleep(poll_sec * 2)
+                continue
 
-            await asyncio.sleep(self.config.poll_interval_ms / 1000.0)
+            await asyncio.sleep(poll_sec)
 
     async def _scan_blocks(self, from_block: int, to_block: int) -> bool:
         try:
