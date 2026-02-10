@@ -32,18 +32,82 @@ def load_csv_data(path: str) -> tuple[np.ndarray, np.ndarray]:
     logger.info("Loading training data from %s", path)
     df = pd.read_csv(path)
 
-    expected_cols = FEATURE_NAMES + ["profitable"]
-    missing = [c for c in expected_cols if c not in df.columns]
-    if missing:
-        logger.error("Missing columns: %s", missing)
+    if "profitable" in df.columns:
+        expected_cols = FEATURE_NAMES + ["profitable"]
+        missing = [c for c in expected_cols if c not in df.columns]
+        if missing:
+            logger.error("Missing columns: %s", missing)
+            sys.exit(1)
+        X = df[FEATURE_NAMES].values
+        y = df["profitable"].values.astype(float)
+    elif "price_5m_pct" in df.columns:
+        logger.info("Detected market_data.csv format — using real price data")
+        return load_market_csv(df)
+    else:
+        logger.error("CSV has neither 'profitable' nor 'price_5m_pct' column")
         sys.exit(1)
-
-    X = df[FEATURE_NAMES].values
-    y = df["profitable"].values.astype(float)
 
     logger.info("Loaded %d samples (%d profitable, %d not)",
                 len(y), int(y.sum()), int(len(y) - y.sum()))
     return X, y
+
+
+def load_market_csv(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    price_col = "price_5m_pct"
+    df_valid = df[df[price_col].notna() & (df[price_col] != "") & (df[price_col] != "dead")].copy()
+    df_dead = df[df[price_col] == "dead"].copy()
+
+    features_list = []
+    labels = []
+
+    for _, row in df_valid.iterrows():
+        feat = _extract_features(row)
+        if feat is not None:
+            features_list.append(feat)
+            pct = float(row[price_col])
+            labels.append(1.0 if pct > 5.0 else 0.0)
+
+    for _, row in df_dead.iterrows():
+        feat = _extract_features(row)
+        if feat is not None:
+            features_list.append(feat)
+            labels.append(0.0)
+
+    if not features_list:
+        logger.error("No valid training samples found in market CSV")
+        sys.exit(1)
+
+    X = np.array(features_list)
+    y = np.array(labels)
+    logger.info(
+        "Loaded %d samples from market CSV (%d profitable, %d not)",
+        len(y), int(y.sum()), int(len(y) - y.sum()),
+    )
+    return X, y
+
+
+def _extract_features(row) -> list[float] | None:
+    try:
+        hp = row.get("is_honeypot", "")
+        is_not_hp = 0.0 if str(hp) == "True" else 1.0
+        buy_tax = float(row.get("buy_tax", 0) or 0)
+        sell_tax = float(row.get("sell_tax", 0) or 0)
+        renounced = 1.0 if str(row.get("ownership_renounced", "")) == "True" else 0.0
+        no_proxy = 0.0 if str(row.get("is_proxy", "")) == "True" else 1.0
+        holder_count = float(row.get("holder_count", 0) or 0)
+        top_holder = float(row.get("top_holder_pct", 0) or 0)
+        not_mintable = 0.0 if str(row.get("is_mintable", "")) == "True" else 1.0
+        liq_locked = 0.0
+        liq_usd = float(row.get("liquidity_usd", 0) or 0)
+        token_age = float(row.get("token_age_seconds", 0) or 0)
+        price_impact = float(row.get("price_impact_pct", 0) or 0)
+        return [
+            is_not_hp, buy_tax, sell_tax, renounced, no_proxy,
+            holder_count, top_holder, not_mintable, liq_locked,
+            liq_usd, token_age, price_impact,
+        ]
+    except (ValueError, TypeError):
+        return None
 
 
 def generate_synthetic_data(n_samples: int = 5000) -> tuple[np.ndarray, np.ndarray]:
@@ -93,12 +157,22 @@ def generate_synthetic_data(n_samples: int = 5000) -> tuple[np.ndarray, np.ndarr
 def main():
     parser = argparse.ArgumentParser(description="Train ML model for token scoring")
     parser.add_argument("--data", type=str, default=None, help="CSV file with trade data")
+    parser.add_argument("--market-data", type=str, default=None, help="market_data.csv with price columns")
     parser.add_argument("--samples", type=int, default=5000, help="Synthetic data samples")
+    parser.add_argument("--fresh", action="store_true", help="Delete old model before training")
     args = parser.parse_args()
 
     setup_logging()
 
-    if args.data and os.path.exists(args.data):
+    if args.fresh:
+        for p in ["models/sniper_model.pkl", "models/scaler.pkl"]:
+            if os.path.exists(p):
+                os.remove(p)
+                logger.info("Deleted old model: %s", p)
+
+    if args.market_data and os.path.exists(args.market_data):
+        X, y = load_csv_data(args.market_data)
+    elif args.data and os.path.exists(args.data):
         X, y = load_csv_data(args.data)
     else:
         X, y = generate_synthetic_data(args.samples)

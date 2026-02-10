@@ -29,6 +29,7 @@ class SniperBot:
         self.trade_history = TradeHistory(config.trade_history_path)
         self._last_retrain_count = 0
         self._paper_positions: dict[str, dict] = {}
+        self._price_tracker: list[dict] = []
 
         self._stats = {
             "tokens_seen": 0,
@@ -115,6 +116,7 @@ class SniperBot:
         )
 
         position_task = asyncio.create_task(self._position_monitor_loop())
+        price_task = asyncio.create_task(self._price_tracker_loop())
 
         try:
             logger.info("Starting pair monitor...")
@@ -124,6 +126,7 @@ class SniperBot:
         finally:
             self._running = False
             position_task.cancel()
+            price_task.cancel()
             if self.monitor:
                 await self.monitor.stop()
             self._print_stats()
@@ -456,7 +459,10 @@ class SniperBot:
         "holder_count", "top_holder_pct", "safety_score",
         "ml_score", "price_impact_pct", "token_age_seconds",
         "total_supply", "decimals", "result",
+        "price_1m_pct", "price_5m_pct", "price_10m_pct", "price_30m_pct",
     ]
+
+    _PRICE_CHECK_INTERVALS = [60, 300, 600, 1800]
 
     def _init_market_csv(self):
         path = "data/market_data.csv"
@@ -493,10 +499,116 @@ class SniperBot:
             token.total_supply,
             token.decimals,
             result,
+            "", "", "", "",
         ]
         with open(path, "a", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(row)
+
+        if result == "passed_all":
+            self._price_tracker.append({
+                "token_address": token.address,
+                "symbol": token.symbol,
+                "created_at": time.time(),
+                "csv_row_idx": self._get_csv_row_count(path) - 1,
+                "checks_done": set(),
+            })
+            logger.info(
+                "[TRACK] Scheduled price checks for %s at 1/5/10/30 min",
+                token.symbol,
+            )
+
+    def _get_csv_row_count(self, path: str) -> int:
+        try:
+            with open(path) as f:
+                return sum(1 for _ in f)
+        except FileNotFoundError:
+            return 0
+
+    async def _price_tracker_loop(self):
+        while self._running:
+            try:
+                await asyncio.sleep(10)
+                if not self._price_tracker:
+                    continue
+
+                now = time.time()
+                for entry in list(self._price_tracker):
+                    age = now - entry["created_at"]
+                    for interval in self._PRICE_CHECK_INTERVALS:
+                        if interval not in entry["checks_done"] and age >= interval:
+                            pct = await self._check_token_price(entry["token_address"])
+                            entry["checks_done"].add(interval)
+                            self._update_csv_price(
+                                entry["csv_row_idx"], interval, pct,
+                            )
+                            status = f"{pct:+.1f}%" if pct is not None else "DEAD"
+                            logger.info(
+                                "[PRICE %s] %s @ %dm: %s",
+                                "CHECK" if pct is not None else "DEAD",
+                                entry["symbol"],
+                                interval // 60,
+                                status,
+                            )
+
+                    if len(entry["checks_done"]) >= len(self._PRICE_CHECK_INTERVALS):
+                        self._price_tracker.remove(entry)
+                        logger.info(
+                            "[TRACK DONE] %s - all price checks complete",
+                            entry["symbol"],
+                        )
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Price tracker error: %s", e)
+
+    async def _check_token_price(self, token_address: str) -> float | None:
+        w3 = self.connection.w3
+        router = w3.eth.contract(
+            address=w3.to_checksum_address(self.config.pancake_router),
+            abi=ROUTER_ABI,
+        )
+        amount_in = w3.to_wei(0.1, "ether")
+        try:
+            amounts = await router.functions.getAmountsOut(
+                amount_in,
+                [
+                    w3.to_checksum_address(WBNB_ADDRESS),
+                    w3.to_checksum_address(token_address),
+                ],
+            ).call()
+            tokens_received = amounts[1]
+
+            sell_amounts = await router.functions.getAmountsOut(
+                tokens_received,
+                [
+                    w3.to_checksum_address(token_address),
+                    w3.to_checksum_address(WBNB_ADDRESS),
+                ],
+            ).call()
+            bnb_back = float(w3.from_wei(sell_amounts[1], "ether"))
+            return ((bnb_back - 0.1) / 0.1) * 100
+        except Exception:
+            return None
+
+    def _update_csv_price(self, row_idx: int, interval: int, pct: float | None):
+        path = "data/market_data.csv"
+        interval_to_col = {60: -4, 300: -3, 600: -2, 1800: -1}
+        col_offset = interval_to_col.get(interval)
+        if col_offset is None:
+            return
+        try:
+            with open(path) as f:
+                lines = list(csv.reader(f))
+            if row_idx < len(lines):
+                val = f"{pct:.2f}" if pct is not None else "dead"
+                lines[row_idx][col_offset] = val
+                with open(path, "w", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerows(lines)
+        except Exception as e:
+            logger.warning("Failed to update CSV price: %s", e)
 
     @staticmethod
     def _estimate_price_impact(buy_amount_bnb: float, liquidity_bnb: float) -> float:

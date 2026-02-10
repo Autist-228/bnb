@@ -161,6 +161,53 @@ class TokenScorer:
         losses = len(y) - wins
         logger.info("Training data: %d wins, %d losses", wins, losses)
 
+        unique_classes = np.unique(y)
+        if len(unique_classes) < 2:
+            logger.warning(
+                "Only one class in training data (class=%d). "
+                "Adding minimal synthetic counter-examples.",
+                int(unique_classes[0]),
+            )
+            n_synthetic = max(5, len(X) // 10)
+            if unique_classes[0] == 0:
+                X_syn = np.column_stack([
+                    np.ones(n_synthetic),
+                    np.random.uniform(0, 3, n_synthetic),
+                    np.random.uniform(0, 3, n_synthetic),
+                    np.ones(n_synthetic),
+                    np.ones(n_synthetic),
+                    np.random.uniform(50, 500, n_synthetic),
+                    np.random.uniform(1, 15, n_synthetic),
+                    np.ones(n_synthetic),
+                    np.ones(n_synthetic),
+                    np.random.uniform(5000, 100000, n_synthetic),
+                    np.random.uniform(60, 600, n_synthetic),
+                    np.random.uniform(0.1, 2, n_synthetic),
+                ])
+                y_syn = np.ones(n_synthetic)
+            else:
+                X_syn = np.column_stack([
+                    np.zeros(n_synthetic),
+                    np.random.uniform(20, 90, n_synthetic),
+                    np.random.uniform(20, 99, n_synthetic),
+                    np.zeros(n_synthetic),
+                    np.zeros(n_synthetic),
+                    np.random.uniform(0, 5, n_synthetic),
+                    np.random.uniform(60, 99, n_synthetic),
+                    np.zeros(n_synthetic),
+                    np.zeros(n_synthetic),
+                    np.random.uniform(0, 500, n_synthetic),
+                    np.random.uniform(0, 30, n_synthetic),
+                    np.random.uniform(10, 80, n_synthetic),
+                ])
+                y_syn = np.zeros(n_synthetic)
+            X = np.vstack([X, X_syn])
+            y = np.concatenate([y, y_syn])
+            logger.info(
+                "Added %d synthetic counter-examples. Total: %d samples",
+                n_synthetic, len(X),
+            )
+
         X_scaled = self.scaler.fit_transform(X)
         self.model.fit(X_scaled, y)
         accuracy = self.model.score(X_scaled, y)
