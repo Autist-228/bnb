@@ -1,5 +1,7 @@
 import asyncio
+import csv
 import logging
+import os
 import time
 from typing import Optional
 
@@ -50,7 +52,9 @@ class SniperBot:
 
         w3 = await self.connection.connect()
 
-        if self.config.paper_trading:
+        if self.config.collect_only:
+            logger.info("DATA COLLECTION MODE - recording all tokens, no trades")
+        elif self.config.paper_trading:
             logger.info("PAPER TRADING MODE - no real transactions")
         else:
             balance = await self.connection.get_balance(self.config.wallet_address)
@@ -97,6 +101,9 @@ class SniperBot:
         logger.info("  Poll interval: %dms", self.config.poll_interval_ms)
         logger.info("  Auto-retrain every: %d closed trades", self.config.auto_retrain_every)
         logger.info("  Paper trading: %s", self.config.paper_trading)
+
+        if self.config.collect_only:
+            self._init_market_csv()
 
         self._stats["start_time"] = time.time()
         self._running = True
@@ -148,13 +155,18 @@ class SniperBot:
             token.decimals,
         )
 
+        liquidity_usd = liq_info.quote_reserve_usd if liq_info else 0.0
+        liquidity_bnb = liq_info.quote_reserve_bnb if liq_info else 0.0
+
         if not meets_liq:
+            if self.config.collect_only:
+                self._record_market_data(
+                    token, liquidity_usd, liquidity_bnb, None, 0.0, "low_liquidity",
+                )
             logger.info("[SKIP] %s - Liquidity too low", token.symbol)
             return
 
         self._stats["tokens_passed_liquidity"] += 1
-        liquidity_usd = liq_info.quote_reserve_usd
-        liquidity_bnb = liq_info.quote_reserve_bnb
         logger.info(
             "[PASS] %s - Liquidity: $%.0f (%.2f BNB)",
             token.symbol, liquidity_usd, liquidity_bnb,
@@ -166,11 +178,30 @@ class SniperBot:
             token.quote_token,
         )
 
+        token_age = time.time() - token.timestamp
+        price_impact = self._estimate_price_impact(
+            self.config.buy_amount_bnb, liquidity_bnb
+        )
+        ml_score, ml_approved, features = self.ml_scorer.predict(
+            safety=safety,
+            liquidity_usd=liquidity_usd,
+            token_age_seconds=token_age,
+            price_impact_pct=price_impact,
+        )
+
         if safety.is_honeypot:
+            if self.config.collect_only:
+                self._record_market_data(
+                    token, liquidity_usd, liquidity_bnb, safety, ml_score, "honeypot",
+                )
             logger.info("[SKIP] %s - HONEYPOT detected", token.symbol)
             return
 
         if safety.buy_tax > self.config.max_buy_tax:
+            if self.config.collect_only:
+                self._record_market_data(
+                    token, liquidity_usd, liquidity_bnb, safety, ml_score, "high_buy_tax",
+                )
             logger.info(
                 "[SKIP] %s - Buy tax too high: %.1f%%",
                 token.symbol,
@@ -179,6 +210,10 @@ class SniperBot:
             return
 
         if safety.sell_tax > self.config.max_sell_tax:
+            if self.config.collect_only:
+                self._record_market_data(
+                    token, liquidity_usd, liquidity_bnb, safety, ml_score, "high_sell_tax",
+                )
             logger.info(
                 "[SKIP] %s - Sell tax too high: %.1f%%",
                 token.symbol,
@@ -188,17 +223,16 @@ class SniperBot:
 
         self._stats["tokens_passed_safety"] += 1
 
-        token_age = time.time() - token.timestamp
-        price_impact = self._estimate_price_impact(
-            self.config.buy_amount_bnb, liquidity_bnb
-        )
-
-        ml_score, ml_approved, features = self.ml_scorer.predict(
-            safety=safety,
-            liquidity_usd=liquidity_usd,
-            token_age_seconds=token_age,
-            price_impact_pct=price_impact,
-        )
+        if self.config.collect_only:
+            self._record_market_data(
+                token, liquidity_usd, liquidity_bnb, safety, ml_score, "passed_all",
+            )
+            logger.info(
+                "[COLLECTED] %s | Liq: $%.0f | Tax: %.1f%%/%.1f%% | ML: %.3f | HP: %s",
+                token.symbol, liquidity_usd, safety.buy_tax, safety.sell_tax,
+                ml_score, safety.is_honeypot,
+            )
+            return
 
         if ml_score < self.config.ml_min_score:
             logger.info(
@@ -413,6 +447,56 @@ class SniperBot:
                 )
         for addr in to_close:
             self._paper_positions.pop(addr, None)
+
+    _MARKET_CSV_FIELDS = [
+        "timestamp", "token_address", "pair_address", "symbol", "name",
+        "liquidity_usd", "liquidity_bnb",
+        "is_honeypot", "buy_tax", "sell_tax",
+        "ownership_renounced", "is_proxy", "is_mintable",
+        "holder_count", "top_holder_pct", "safety_score",
+        "ml_score", "price_impact_pct", "token_age_seconds",
+        "total_supply", "decimals", "result",
+    ]
+
+    def _init_market_csv(self):
+        path = "data/market_data.csv"
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if not os.path.exists(path):
+            with open(path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(self._MARKET_CSV_FIELDS)
+
+    def _record_market_data(self, token, liq_usd, liq_bnb, safety, ml_score, result):
+        path = "data/market_data.csv"
+        token_age = time.time() - token.timestamp
+        price_impact = self._estimate_price_impact(self.config.buy_amount_bnb, liq_bnb)
+        row = [
+            time.time(),
+            token.address,
+            token.pair_address,
+            token.symbol,
+            token.name,
+            liq_usd,
+            liq_bnb,
+            safety.is_honeypot if safety else "",
+            safety.buy_tax if safety else "",
+            safety.sell_tax if safety else "",
+            safety.ownership_renounced if safety else "",
+            safety.is_proxy if safety else "",
+            safety.is_mintable if safety else "",
+            safety.holder_count if safety else "",
+            safety.top_holder_pct if safety else "",
+            safety.safety_score if safety else "",
+            ml_score,
+            price_impact,
+            token_age,
+            token.total_supply,
+            token.decimals,
+            result,
+        ]
+        with open(path, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(row)
 
     @staticmethod
     def _estimate_price_impact(buy_amount_bnb: float, liquidity_bnb: float) -> float:

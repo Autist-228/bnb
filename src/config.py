@@ -202,6 +202,7 @@ class BotConfig:
     auto_retrain_every: int = int(os.getenv("AUTO_RETRAIN_EVERY", "50"))
     trade_history_path: str = os.getenv("TRADE_HISTORY_PATH", "data/trades.csv")
     paper_trading: bool = os.getenv("PAPER_TRADING", "false").lower() in ("true", "1", "yes")
+    collect_only: bool = False
 
     pancake_factory: str = PANCAKE_FACTORY_V2
     pancake_router: str = PANCAKE_ROUTER_V2

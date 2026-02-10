@@ -89,6 +89,11 @@ Examples:
         help="Paper trading mode (no real transactions)",
     )
     parser.add_argument(
+        "--collect-only",
+        action="store_true",
+        help="Data collection mode: record ALL tokens to CSV, no trades",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug logging",
@@ -126,6 +131,9 @@ def main():
     if args.poll_interval is not None:
         config.poll_interval_ms = args.poll_interval
     if args.paper:
+        config.paper_trading = True
+    if args.collect_only:
+        config.collect_only = True
         config.paper_trading = True
 
     if not config.paper_trading:
