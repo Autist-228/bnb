@@ -84,6 +84,11 @@ Examples:
         help="Polling interval in ms (default: 100)",
     )
     parser.add_argument(
+        "--paper",
+        action="store_true",
+        help="Paper trading mode (no real transactions)",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug logging",
@@ -120,13 +125,16 @@ def main():
         config.max_sell_tax = args.max_sell_tax
     if args.poll_interval is not None:
         config.poll_interval_ms = args.poll_interval
+    if args.paper:
+        config.paper_trading = True
 
-    if not config.private_key:
-        logger.error("PRIVATE_KEY not set! Check your .env file.")
-        sys.exit(1)
-    if not config.wallet_address:
-        logger.error("WALLET_ADDRESS not set! Check your .env file.")
-        sys.exit(1)
+    if not config.paper_trading:
+        if not config.private_key:
+            logger.error("PRIVATE_KEY not set! Check your .env file.")
+            sys.exit(1)
+        if not config.wallet_address:
+            logger.error("WALLET_ADDRESS not set! Check your .env file.")
+            sys.exit(1)
 
     bot = SniperBot(config)
 

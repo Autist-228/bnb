@@ -3,7 +3,7 @@ import logging
 import time
 from typing import Optional
 
-from src.config import BotConfig
+from src.config import BotConfig, ROUTER_ABI, WBNB_ADDRESS
 from src.blockchain import BlockchainConnection
 from src.monitor import PairMonitor, TokenInfo
 from src.liquidity import LiquidityChecker
@@ -26,6 +26,7 @@ class SniperBot:
         self.monitor: Optional[PairMonitor] = None
         self.trade_history = TradeHistory(config.trade_history_path)
         self._last_retrain_count = 0
+        self._paper_positions: dict[str, dict] = {}
 
         self._stats = {
             "tokens_seen": 0,
@@ -49,20 +50,23 @@ class SniperBot:
 
         w3 = await self.connection.connect()
 
-        balance = await self.connection.get_balance(self.config.wallet_address)
-        logger.info("Wallet: %s | Balance: %.4f BNB", self.config.wallet_address, balance)
-
-        if balance < self.config.buy_amount_bnb:
-            logger.error(
-                "Insufficient balance: %.4f BNB < %.4f BNB (buy amount)",
-                balance,
-                self.config.buy_amount_bnb,
-            )
-            return
+        if self.config.paper_trading:
+            logger.info("PAPER TRADING MODE - no real transactions")
+        else:
+            balance = await self.connection.get_balance(self.config.wallet_address)
+            logger.info("Wallet: %s | Balance: %.4f BNB", self.config.wallet_address, balance)
+            if balance < self.config.buy_amount_bnb:
+                logger.error(
+                    "Insufficient balance: %.4f BNB < %.4f BNB (buy amount)",
+                    balance,
+                    self.config.buy_amount_bnb,
+                )
+                return
 
         self.liquidity_checker = LiquidityChecker(w3, self.config)
         self.safety_analyzer = SafetyAnalyzer(w3, self.config)
-        self.executor = SniperExecutor(self.connection, self.config)
+        if not self.config.paper_trading:
+            self.executor = SniperExecutor(self.connection, self.config)
 
         logger.info("Loading ML model...")
         self.ml_scorer.load()
@@ -92,6 +96,7 @@ class SniperBot:
         logger.info("  Stop loss: %.0f%%", self.config.stop_loss_percent)
         logger.info("  Poll interval: %dms", self.config.poll_interval_ms)
         logger.info("  Auto-retrain every: %d closed trades", self.config.auto_retrain_every)
+        logger.info("  Paper trading: %s", self.config.paper_trading)
 
         self._stats["start_time"] = time.time()
         self._running = True
@@ -219,17 +224,21 @@ class SniperBot:
         )
 
         self._stats["buys_attempted"] += 1
+
+        if self.config.paper_trading:
+            await self._paper_buy(token, features)
+        else:
+            await self._real_buy(token, features)
+
+    async def _real_buy(self, token: TokenInfo, features: list[float]):
         result = await self.executor.buy_token(
             token_address=token.address,
             amount_bnb=self.config.buy_amount_bnb,
         )
-
         if result["success"]:
             self._stats["buys_success"] += 1
-
             bnb_price = await self.liquidity_checker.get_bnb_price_usd()
             buy_price_usd = self.config.buy_amount_bnb * bnb_price
-
             self.trade_history.record_buy(
                 features=features,
                 token_address=token.address,
@@ -239,70 +248,171 @@ class SniperBot:
                 buy_price_usd=buy_price_usd,
                 buy_tx=result["tx_hash"],
             )
-
             logger.info(
                 "[BOUGHT] %s | TX: %s | $%.2f | Gas: %d",
-                token.symbol,
-                result["tx_hash"],
-                buy_price_usd,
-                result["gas_used"],
+                token.symbol, result["tx_hash"], buy_price_usd, result["gas_used"],
             )
         else:
             logger.error("[BUY FAILED] %s | TX: %s", token.symbol, result["tx_hash"])
+
+    async def _paper_buy(self, token: TokenInfo, features: list[float]):
+        w3 = self.connection.w3
+        router = w3.eth.contract(
+            address=w3.to_checksum_address(self.config.pancake_router),
+            abi=ROUTER_ABI,
+        )
+        amount_in_wei = w3.to_wei(self.config.buy_amount_bnb, "ether")
+        try:
+            amounts = await router.functions.getAmountsOut(
+                amount_in_wei,
+                [
+                    w3.to_checksum_address(WBNB_ADDRESS),
+                    w3.to_checksum_address(token.address),
+                ],
+            ).call()
+            token_amount = amounts[1]
+        except Exception as e:
+            logger.warning("[PAPER] getAmountsOut failed for %s: %s", token.symbol, e)
+            return
+
+        self._stats["buys_success"] += 1
+        bnb_price = await self.liquidity_checker.get_bnb_price_usd()
+        buy_price_usd = self.config.buy_amount_bnb * bnb_price
+
+        self._paper_positions[token.address] = {
+            "symbol": token.symbol,
+            "buy_price_bnb": self.config.buy_amount_bnb,
+            "token_amount": token_amount,
+            "buy_time": time.time(),
+        }
+
+        self.trade_history.record_buy(
+            features=features,
+            token_address=token.address,
+            pair_address=token.pair_address,
+            symbol=token.symbol,
+            buy_price_bnb=self.config.buy_amount_bnb,
+            buy_price_usd=buy_price_usd,
+            buy_tx="paper_" + token.address[:16],
+        )
+        logger.info(
+            "[PAPER BUY] %s | $%.2f | Tokens: %d",
+            token.symbol, buy_price_usd, token_amount,
+        )
 
     async def _position_monitor_loop(self):
         while self._running:
             try:
                 await asyncio.sleep(5)
 
-                if not self.executor:
-                    continue
-
-                positions = dict(self.executor.active_positions)
-                for token_address in positions:
-                    profit_info = await self.executor.check_profit(token_address)
-
-                    if profit_info["should_sell"]:
-                        reason = profit_info["reason"]
-                        profit_pct = profit_info["profit_pct"]
-                        logger.info(
-                            "[AUTO-SELL] %s | Reason: %s | Profit: %.2f%%",
-                            token_address[:16] + "...",
-                            reason,
-                            profit_pct,
-                        )
-
-                        self._stats["sells_attempted"] += 1
-                        result = await self.executor.sell_token(token_address)
-                        if result["success"]:
-                            self._stats["sells_success"] += 1
-
-                            bnb_price = await self.liquidity_checker.get_bnb_price_usd()
-                            sell_value_bnb = profit_info.get("current_value_bnb", 0)
-                            sell_value_usd = sell_value_bnb * bnb_price
-
-                            self.trade_history.record_sell(
-                                token_address=token_address,
-                                sell_price_bnb=sell_value_bnb,
-                                sell_price_usd=sell_value_usd,
-                                sell_tx=result["tx_hash"],
-                                profit_pct=profit_pct,
-                            )
-
-                            self._try_retrain()
-
-                            logger.info(
-                                "[SOLD] %s | TX: %s | Profit: %.2f%% | $%.2f",
-                                token_address[:16] + "...",
-                                result["tx_hash"],
-                                profit_pct,
-                                sell_value_usd,
-                            )
+                if self.config.paper_trading:
+                    await self._paper_position_check()
+                else:
+                    await self._real_position_check()
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error("Position monitor error: %s", e)
+
+    async def _real_position_check(self):
+        if not self.executor:
+            return
+        positions = dict(self.executor.active_positions)
+        for token_address in positions:
+            profit_info = await self.executor.check_profit(token_address)
+            if profit_info["should_sell"]:
+                reason = profit_info["reason"]
+                profit_pct = profit_info["profit_pct"]
+                logger.info(
+                    "[AUTO-SELL] %s | Reason: %s | Profit: %.2f%%",
+                    token_address[:16] + "...", reason, profit_pct,
+                )
+                self._stats["sells_attempted"] += 1
+                result = await self.executor.sell_token(token_address)
+                if result["success"]:
+                    self._stats["sells_success"] += 1
+                    bnb_price = await self.liquidity_checker.get_bnb_price_usd()
+                    sell_value_bnb = profit_info.get("current_value_bnb", 0)
+                    sell_value_usd = sell_value_bnb * bnb_price
+                    self.trade_history.record_sell(
+                        token_address=token_address,
+                        sell_price_bnb=sell_value_bnb,
+                        sell_price_usd=sell_value_usd,
+                        sell_tx=result["tx_hash"],
+                        profit_pct=profit_pct,
+                    )
+                    self._try_retrain()
+                    logger.info(
+                        "[SOLD] %s | TX: %s | Profit: %.2f%% | $%.2f",
+                        token_address[:16] + "...", result["tx_hash"],
+                        profit_pct, sell_value_usd,
+                    )
+
+    async def _paper_position_check(self):
+        w3 = self.connection.w3
+        router = w3.eth.contract(
+            address=w3.to_checksum_address(self.config.pancake_router),
+            abi=ROUTER_ABI,
+        )
+        to_close: list[str] = []
+        for token_address, pos in list(self._paper_positions.items()):
+            try:
+                amounts = await router.functions.getAmountsOut(
+                    pos["token_amount"],
+                    [
+                        w3.to_checksum_address(token_address),
+                        w3.to_checksum_address(WBNB_ADDRESS),
+                    ],
+                ).call()
+                current_value_bnb = float(w3.from_wei(amounts[1], "ether"))
+            except Exception:
+                age = time.time() - pos["buy_time"]
+                if age > 300:
+                    current_value_bnb = 0.0
+                else:
+                    continue
+
+            buy_price = pos["buy_price_bnb"]
+            profit_pct = ((current_value_bnb - buy_price) / buy_price) * 100 if buy_price > 0 else 0
+
+            should_sell = False
+            reason = "hold"
+            if profit_pct >= self.config.take_profit_percent:
+                should_sell = True
+                reason = "take_profit"
+            elif profit_pct <= -self.config.stop_loss_percent:
+                should_sell = True
+                reason = "stop_loss"
+            elif time.time() - pos["buy_time"] > 600:
+                should_sell = True
+                reason = "timeout_10m"
+
+            if should_sell:
+                self._stats["sells_attempted"] += 1
+                self._stats["sells_success"] += 1
+                bnb_price = await self.liquidity_checker.get_bnb_price_usd()
+                sell_value_usd = current_value_bnb * bnb_price
+                self.trade_history.record_sell(
+                    token_address=token_address,
+                    sell_price_bnb=current_value_bnb,
+                    sell_price_usd=sell_value_usd,
+                    sell_tx="paper_sell_" + token_address[:12],
+                    profit_pct=profit_pct,
+                )
+                self._try_retrain()
+                logger.info(
+                    "[PAPER SELL] %s | Reason: %s | Profit: %.2f%% | $%.2f",
+                    pos["symbol"], reason, profit_pct, sell_value_usd,
+                )
+                to_close.append(token_address)
+            else:
+                logger.debug(
+                    "[PAPER HOLD] %s | Profit: %.2f%%",
+                    pos["symbol"], profit_pct,
+                )
+        for addr in to_close:
+            self._paper_positions.pop(addr, None)
 
     @staticmethod
     def _estimate_price_impact(buy_amount_bnb: float, liquidity_bnb: float) -> float:
