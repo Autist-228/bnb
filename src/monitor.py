@@ -12,6 +12,8 @@ from src.config import (
     ERC20_ABI,
 )
 
+PAIR_CREATED_TOPIC = "0x0d3648bd0f6ba80134a33ba9275ac585d9d315f0ad8355cddefde31afa28d0e9"
+
 logger = logging.getLogger("sniper.monitor")
 
 
@@ -59,6 +61,7 @@ class PairMonitor:
         self._last_block = 0
         self._seen_pairs: set = set()
         self._factory: Optional[AsyncContract] = None
+        self._backoff = 0.0
 
     async def start(self):
         self._factory = self.w3.eth.contract(
@@ -79,23 +82,44 @@ class PairMonitor:
         logger.info("PairMonitor stopped")
 
     async def _poll_loop(self):
+        consecutive_fails = 0
         while self._running:
             try:
                 current_block = await self.w3.eth.block_number
                 if current_block > self._last_block:
-                    await self._scan_blocks(self._last_block + 1, current_block)
-                    self._last_block = current_block
+                    gap = current_block - self._last_block
+                    if gap > 20:
+                        logger.warning(
+                            "Block gap too large (%d blocks), skipping to current",
+                            gap,
+                        )
+                        self._last_block = current_block - 5
+
+                    ok = await self._scan_blocks(self._last_block + 1, current_block)
+                    if ok:
+                        self._last_block = current_block
+                        consecutive_fails = 0
+                    else:
+                        consecutive_fails += 1
+                        cooldown = min(2.0 * consecutive_fails, 10.0)
+                        await asyncio.sleep(cooldown)
+                        if consecutive_fails >= 3:
+                            self._last_block = current_block
+                            consecutive_fails = 0
+                        continue
             except Exception as e:
                 logger.error("Poll error: %s", e)
+                await asyncio.sleep(3.0)
 
             await asyncio.sleep(self.config.poll_interval_ms / 1000.0)
 
-    async def _scan_blocks(self, from_block: int, to_block: int):
+    async def _scan_blocks(self, from_block: int, to_block: int) -> bool:
         try:
             pair_created_filter = {
                 "fromBlock": from_block,
                 "toBlock": to_block,
                 "address": self.w3.to_checksum_address(self.config.pancake_factory),
+                "topics": [PAIR_CREATED_TOPIC],
             }
             logs = await self.w3.eth.get_logs(pair_created_filter)
 
@@ -103,8 +127,14 @@ class PairMonitor:
                 if len(log["topics"]) >= 3:
                     await self._process_pair_event(log)
 
+            return True
         except Exception as e:
-            logger.error("Block scan error [%d-%d]: %s", from_block, to_block, e)
+            msg = str(e)
+            if "limit" in msg.lower() or "-32005" in msg or "-32000" in msg:
+                logger.debug("Rate limited [%d-%d]", from_block, to_block)
+            else:
+                logger.error("Block scan error [%d-%d]: %s", from_block, to_block, e)
+            return False
 
     async def _process_pair_event(self, log: dict):
         try:

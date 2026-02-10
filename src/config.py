@@ -170,7 +170,7 @@ ERC20_ABI = [
 @dataclass
 class BotConfig:
     bsc_wss_url: str = os.getenv("BSC_WSS_URL", "wss://bsc-ws-node.nariox.org:443")
-    bsc_https_url: str = os.getenv("BSC_HTTPS_URL", "https://bsc-dataseed1.binance.org")
+    bsc_https_url: str = os.getenv("BSC_HTTPS_URL", "https://bsc.publicnode.com")
     private_key: str = os.getenv("PRIVATE_KEY", "")
     wallet_address: str = os.getenv("WALLET_ADDRESS", "")
 
