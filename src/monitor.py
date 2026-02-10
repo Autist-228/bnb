@@ -100,64 +100,109 @@ class PairMonitor:
 
     async def _poll_loop(self):
         poll_sec = max(self.config.poll_interval_ms / 1000.0, 5.0)
+        last_pair_count = await self._safe_pair_count()
+        if last_pair_count is None:
+            logger.error("Cannot get initial pair count")
+            return
+        logger.info("Initial pair count: %d | Polling every %.0fs", last_pair_count, poll_sec)
+
         while self._running:
-            try:
-                current_block = await self.w3.eth.block_number
-                if current_block <= self._last_block:
-                    await asyncio.sleep(poll_sec)
-                    continue
-
-                gap = current_block - self._last_block
-                if gap > 100:
-                    self._last_block = current_block - 20
-                    gap = current_block - self._last_block
-
-                ok = await self._scan_blocks(self._last_block + 1, current_block)
-                if ok:
-                    self._last_block = current_block
-                    self._rate_limit_count = 0
-                else:
-                    self._rate_limit_count += 1
-                    self._rotate_node()
-                    self._last_block = current_block
-                    await asyncio.sleep(poll_sec * 2)
-                    continue
-            except Exception as e:
-                msg = str(e).lower()
-                if any(s in msg for s in ["limit", "32005", "429", "too many"]):
-                    self._rotate_node()
-                else:
-                    logger.error("Poll error: %s", e)
-                    self._rotate_node()
-                await asyncio.sleep(poll_sec * 2)
-                continue
-
             await asyncio.sleep(poll_sec)
+            try:
+                current_count = await self._safe_pair_count()
+                if current_count is None:
+                    self._rotate_node()
+                    continue
 
-    async def _scan_blocks(self, from_block: int, to_block: int) -> bool:
+                if current_count > last_pair_count:
+                    new_count = current_count - last_pair_count
+                    logger.info("Detected %d new pair(s) (total: %d)", new_count, current_count)
+                    for idx in range(last_pair_count, current_count):
+                        await self._process_pair_by_index(idx)
+                    last_pair_count = current_count
+                else:
+                    last_pair_count = current_count
+            except Exception as e:
+                logger.error("Poll error: %s", e)
+                self._rotate_node()
+
+    async def _safe_pair_count(self) -> int | None:
+        for _ in range(3):
+            try:
+                return await self._factory.functions.allPairsLength().call()
+            except Exception:
+                self._rotate_node()
+                await asyncio.sleep(2)
+        return None
+
+    async def _process_pair_by_index(self, index: int):
         try:
-            pair_created_filter = {
-                "fromBlock": from_block,
-                "toBlock": to_block,
-                "address": self.w3.to_checksum_address(self.config.pancake_factory),
-                "topics": [PAIR_CREATED_TOPIC],
-            }
-            logs = await self.w3.eth.get_logs(pair_created_filter)
+            pair_address = await self._factory.functions.allPairs(index).call()
+            pair_address = self.w3.to_checksum_address(pair_address)
 
-            for log in logs:
-                if len(log["topics"]) >= 3:
-                    await self._process_pair_event(log)
+            pair_abi = [
+                {"constant": True, "inputs": [], "name": "token0", "outputs": [{"name": "", "type": "address"}], "type": "function"},
+                {"constant": True, "inputs": [], "name": "token1", "outputs": [{"name": "", "type": "address"}], "type": "function"},
+            ]
+            pair_contract = self.w3.eth.contract(address=pair_address, abi=pair_abi)
 
-            return True
-        except Exception as e:
-            msg = str(e).lower()
-            is_rate_limit = any(s in msg for s in ["limit", "32005", "32000", "429", "too many"])
-            if is_rate_limit:
-                if self._rate_limit_count % 20 == 0:
-                    logger.warning("Rate limited on blocks %d-%d", from_block, to_block)
+            token0, token1 = await asyncio.gather(
+                pair_contract.functions.token0().call(),
+                pair_contract.functions.token1().call(),
+            )
+            token0 = self.w3.to_checksum_address(token0)
+            token1 = self.w3.to_checksum_address(token1)
+
+            pair_key = f"{token0}-{token1}"
+            if pair_key in self._seen_pairs:
+                return
+            self._seen_pairs.add(pair_key)
+
+            quote_tokens_lower = [q.lower() for q in self.config.quote_tokens]
+            if token0.lower() in quote_tokens_lower:
+                target_token = token1
+                quote_token = token0
+            elif token1.lower() in quote_tokens_lower:
+                target_token = token0
+                quote_token = token1
             else:
-                logger.error("Block scan error [%d-%d]: %s", from_block, to_block, e)
-            return False
+                return
+
+            token_info = await self._fetch_token_info_simple(
+                target_token, pair_address, quote_token
+            )
+            if token_info:
+                logger.info(
+                    "NEW PAIR: %s (%s) | Pair: %s",
+                    token_info.symbol, token_info.address, token_info.pair_address,
+                )
+                if self.on_new_pair:
+                    await self.on_new_pair(token_info)
+        except Exception as e:
+            logger.error("Process pair index %d error: %s", index, e)
+
+    async def _fetch_token_info_simple(
+        self, token_address: str, pair_address: str, quote_token: str,
+    ) -> TokenInfo | None:
+        try:
+            token_contract = self.w3.eth.contract(
+                address=self.w3.to_checksum_address(token_address), abi=ERC20_ABI,
+            )
+            name, symbol, decimals, total_supply = await asyncio.gather(
+                self._safe_call(token_contract.functions.name(), "Unknown"),
+                self._safe_call(token_contract.functions.symbol(), "???"),
+                self._safe_call(token_contract.functions.decimals(), 18),
+                self._safe_call(token_contract.functions.totalSupply(), 0),
+            )
+            return TokenInfo(
+                address=token_address, pair_address=pair_address,
+                name=name, symbol=symbol, decimals=decimals,
+                total_supply=total_supply, quote_token=quote_token,
+                block_number=0, timestamp=time.time(),
+            )
+        except Exception as e:
+            logger.error("Fetch token info error for %s: %s", token_address, e)
+            return None
 
     async def _process_pair_event(self, log: dict):
         try:
