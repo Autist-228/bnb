@@ -175,7 +175,7 @@ class BotConfig:
     wallet_address: str = os.getenv("WALLET_ADDRESS", "")
 
     buy_amount_bnb: float = float(os.getenv("BUY_AMOUNT_BNB", "0.1"))
-    min_liquidity_bnb: float = float(os.getenv("MIN_LIQUIDITY_BNB", "1500"))
+    min_liquidity_usd: float = float(os.getenv("MIN_LIQUIDITY_USD", "1500"))
     max_buy_tax: float = float(os.getenv("MAX_BUY_TAX", "10"))
     max_sell_tax: float = float(os.getenv("MAX_SELL_TAX", "10"))
     slippage_percent: float = float(os.getenv("SLIPPAGE_PERCENT", "12"))
@@ -187,6 +187,8 @@ class BotConfig:
 
     ml_min_score: float = float(os.getenv("ML_MIN_SCORE", "0.7"))
     poll_interval_ms: int = int(os.getenv("POLL_INTERVAL_MS", "100"))
+    auto_retrain_every: int = int(os.getenv("AUTO_RETRAIN_EVERY", "50"))
+    trade_history_path: str = os.getenv("TRADE_HISTORY_PATH", "data/trades.csv")
 
     pancake_factory: str = PANCAKE_FACTORY_V2
     pancake_router: str = PANCAKE_ROUTER_V2

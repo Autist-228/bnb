@@ -7,7 +7,7 @@ Reads trade history from a CSV file and retrains the GradientBoosting model.
 CSV format:
   is_not_honeypot,buy_tax,sell_tax,ownership_renounced,no_proxy,
   holder_count,top_holder_pct,not_mintable,liquidity_locked,
-  liquidity_bnb,token_age_seconds,price_impact_pct,profitable
+  liquidity_usd,token_age_seconds,price_impact_pct,profitable
 
 Usage:
   python train_model.py --data trades.csv

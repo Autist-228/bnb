@@ -10,6 +10,7 @@ from src.liquidity import LiquidityChecker
 from src.safety import SafetyAnalyzer
 from src.ml_model import TokenScorer
 from src.sniper import SniperExecutor
+from src.trade_history import TradeHistory
 
 logger = logging.getLogger("sniper.bot")
 
@@ -23,6 +24,8 @@ class SniperBot:
         self.ml_scorer = TokenScorer()
         self.executor: Optional[SniperExecutor] = None
         self.monitor: Optional[PairMonitor] = None
+        self.trade_history = TradeHistory(config.trade_history_path)
+        self._last_retrain_count = 0
 
         self._stats = {
             "tokens_seen": 0,
@@ -68,9 +71,19 @@ class SniperBot:
             top_features = sorted(importance.items(), key=lambda x: x[1], reverse=True)[:5]
             logger.info("Top ML features: %s", top_features)
 
+        trade_stats = self.trade_history.get_stats()
+        if trade_stats["total"] > 0:
+            logger.info(
+                "Trade history: %d trades | Win rate: %.1f%% | Avg profit: %.2f%%",
+                trade_stats["total"],
+                trade_stats["win_rate"],
+                trade_stats["avg_profit"],
+            )
+            self._try_retrain()
+
         logger.info("Configuration:")
         logger.info("  Buy amount: %.4f BNB", self.config.buy_amount_bnb)
-        logger.info("  Min liquidity: %.0f BNB", self.config.min_liquidity_bnb)
+        logger.info("  Min liquidity: $%.0f", self.config.min_liquidity_usd)
         logger.info("  Max buy tax: %.1f%%", self.config.max_buy_tax)
         logger.info("  Max sell tax: %.1f%%", self.config.max_sell_tax)
         logger.info("  Slippage: %.1f%%", self.config.slippage_percent)
@@ -78,6 +91,7 @@ class SniperBot:
         logger.info("  Take profit: %.0f%%", self.config.take_profit_percent)
         logger.info("  Stop loss: %.0f%%", self.config.stop_loss_percent)
         logger.info("  Poll interval: %dms", self.config.poll_interval_ms)
+        logger.info("  Auto-retrain every: %d closed trades", self.config.auto_retrain_every)
 
         self._stats["start_time"] = time.time()
         self._running = True
@@ -134,8 +148,12 @@ class SniperBot:
             return
 
         self._stats["tokens_passed_liquidity"] += 1
+        liquidity_usd = liq_info.quote_reserve_usd
         liquidity_bnb = liq_info.quote_reserve_bnb
-        logger.info("[PASS] %s - Liquidity: %.2f BNB", token.symbol, liquidity_bnb)
+        logger.info(
+            "[PASS] %s - Liquidity: $%.0f (%.2f BNB)",
+            token.symbol, liquidity_usd, liquidity_bnb,
+        )
 
         safety = await self.safety_analyzer.analyze(
             token.address,
@@ -170,9 +188,9 @@ class SniperBot:
             self.config.buy_amount_bnb, liquidity_bnb
         )
 
-        ml_score, ml_approved = self.ml_scorer.predict(
+        ml_score, ml_approved, features = self.ml_scorer.predict(
             safety=safety,
-            liquidity_bnb=liquidity_bnb,
+            liquidity_usd=liquidity_usd,
             token_age_seconds=token_age,
             price_impact_pct=price_impact,
         )
@@ -190,11 +208,11 @@ class SniperBot:
 
         elapsed = time.time() - start_time
         logger.info(
-            "[BUY SIGNAL] %s | Score: %.3f | Liq: %.0f BNB | "
+            "[BUY SIGNAL] %s | Score: %.3f | Liq: $%.0f | "
             "Tax: %.1f%%/%.1f%% | Analysis: %.2fs",
             token.symbol,
             ml_score,
-            liquidity_bnb,
+            liquidity_usd,
             safety.buy_tax,
             safety.sell_tax,
             elapsed,
@@ -208,10 +226,25 @@ class SniperBot:
 
         if result["success"]:
             self._stats["buys_success"] += 1
+
+            bnb_price = await self.liquidity_checker.get_bnb_price_usd()
+            buy_price_usd = self.config.buy_amount_bnb * bnb_price
+
+            self.trade_history.record_buy(
+                features=features,
+                token_address=token.address,
+                pair_address=token.pair_address,
+                symbol=token.symbol,
+                buy_price_bnb=self.config.buy_amount_bnb,
+                buy_price_usd=buy_price_usd,
+                buy_tx=result["tx_hash"],
+            )
+
             logger.info(
-                "[BOUGHT] %s | TX: %s | Gas: %d",
+                "[BOUGHT] %s | TX: %s | $%.2f | Gas: %d",
                 token.symbol,
                 result["tx_hash"],
+                buy_price_usd,
                 result["gas_used"],
             )
         else:
@@ -243,11 +276,27 @@ class SniperBot:
                         result = await self.executor.sell_token(token_address)
                         if result["success"]:
                             self._stats["sells_success"] += 1
+
+                            bnb_price = await self.liquidity_checker.get_bnb_price_usd()
+                            sell_value_bnb = profit_info.get("current_value_bnb", 0)
+                            sell_value_usd = sell_value_bnb * bnb_price
+
+                            self.trade_history.record_sell(
+                                token_address=token_address,
+                                sell_price_bnb=sell_value_bnb,
+                                sell_price_usd=sell_value_usd,
+                                sell_tx=result["tx_hash"],
+                                profit_pct=profit_pct,
+                            )
+
+                            self._try_retrain()
+
                             logger.info(
-                                "[SOLD] %s | TX: %s | Profit: %.2f%%",
+                                "[SOLD] %s | TX: %s | Profit: %.2f%% | $%.2f",
                                 token_address[:16] + "...",
                                 result["tx_hash"],
                                 profit_pct,
+                                sell_value_usd,
                             )
 
             except asyncio.CancelledError:
@@ -261,8 +310,37 @@ class SniperBot:
             return 100.0
         return (buy_amount_bnb / liquidity_bnb) * 100
 
+    def _try_retrain(self):
+        closed_count = self.trade_history.closed_trades_count
+        if closed_count <= self._last_retrain_count:
+            return
+        if (closed_count - self._last_retrain_count) < self.config.auto_retrain_every:
+            return
+
+        training_data = self.trade_history.get_training_data()
+        if training_data is None:
+            return
+
+        X, y = training_data
+        logger.info(
+            "[RETRAIN] Auto-retraining ML model with %d real trades",
+            len(X),
+        )
+        accuracy = self.ml_scorer.retrain(X, y)
+        self._last_retrain_count = closed_count
+
+        stats = self.trade_history.get_stats()
+        logger.info(
+            "[RETRAIN] Model updated | Accuracy: %.3f | "
+            "Win rate: %.1f%% | Avg profit: %.2f%%",
+            accuracy,
+            stats["win_rate"],
+            stats["avg_profit"],
+        )
+
     def _print_stats(self):
         elapsed = time.time() - self._stats["start_time"]
+        trade_stats = self.trade_history.get_stats()
         logger.info("=" * 60)
         logger.info("SESSION STATS (%.0f seconds)", elapsed)
         logger.info("=" * 60)
@@ -275,4 +353,8 @@ class SniperBot:
         logger.info("Buys success:      %d", self._stats["buys_success"])
         logger.info("Sells attempted:   %d", self._stats["sells_attempted"])
         logger.info("Sells success:     %d", self._stats["sells_success"])
+        logger.info("-" * 60)
+        logger.info("Total trades:      %d", trade_stats["total"])
+        logger.info("Win rate:          %.1f%%", trade_stats["win_rate"])
+        logger.info("Avg profit:        %.2f%%", trade_stats["avg_profit"])
         logger.info("=" * 60)

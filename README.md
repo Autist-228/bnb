@@ -5,12 +5,14 @@
 ## Возможности
 
 - **Мониторинг новых пар** — отслеживание PairCreated событий на PancakeSwap Factory в реальном времени
-- **Фильтр ликвидности** — покупка только токенов с ликвидностью >= 1500 BNB (настраивается)
+- **Фильтр ликвидности** — покупка только токенов с ликвидностью >= $1500 USD (настраивается)
 - **Honeypot детекция** — симуляция buy/sell для определения, можно ли продать токен
 - **Rug Pull защита** — проверка ownership, mint функций, концентрации холдеров
 - **ML модель** — GradientBoosting классификатор оценивает токен по 12 параметрам
 - **Авто Buy/Sell** — мгновенная покупка при прохождении всех проверок
 - **Take Profit / Stop Loss** — автоматическая продажа при достижении цели
+- **Онлайн-обучение** — бот записывает все трейды и автоматически переобучает ML модель на реальных данных
+- **История трейдов** — CSV база всех сделок с фичами для анализа и обучения
 - **Быстрый polling** — обновление каждые 100ms (настраивается)
 
 ## Архитектура
@@ -27,6 +29,7 @@ src/
   ml_model.py        - ML модель скоринга токенов
   sniper.py          - Исполнение buy/sell
   bot.py             - Оркестратор бота
+  trade_history.py   - История трейдов + данные для обучения
   utils.py           - Утилиты, логирование
 ```
 
@@ -45,7 +48,7 @@ GradientBoosting классификатор анализирует 12 фичей
 | top_holder_pct | % токенов у топ-холдера |
 | not_mintable | Нет функции mint |
 | liquidity_locked | Ликвидность залочена |
-| liquidity_bnb | Ликвидность в BNB |
+| liquidity_usd | Ликвидность в USD |
 | token_age_seconds | Возраст токена |
 | price_impact_pct | Price impact при покупке |
 
@@ -78,7 +81,7 @@ WALLET_ADDRESS=ваш_адрес_кошелька
 
 # Параметры бота
 BUY_AMOUNT_BNB=0.1          # Сумма покупки в BNB
-MIN_LIQUIDITY_BNB=1500      # Минимальная ликвидность
+MIN_LIQUIDITY_USD=1500      # Минимальная ликвидность в USD
 MAX_BUY_TAX=10               # Макс. налог на покупку %
 MAX_SELL_TAX=10               # Макс. налог на продажу %
 SLIPPAGE_PERCENT=12           # Допустимый slippage %
@@ -88,6 +91,8 @@ TAKE_PROFIT_PERCENT=100       # Тейк профит %
 STOP_LOSS_PERCENT=30          # Стоп лосс %
 ML_MIN_SCORE=0.7              # Мин. ML скор для покупки
 POLL_INTERVAL_MS=100          # Интервал опроса в мс
+AUTO_RETRAIN_EVERY=50         # Переобучать модель каждые N закрытых сделок
+TRADE_HISTORY_PATH=data/trades.csv  # Файл истории трейдов
 ```
 
 ## Запуск
@@ -122,7 +127,7 @@ python train_model.py --data trades.csv
 ### Формат CSV для обучения
 
 ```csv
-is_not_honeypot,buy_tax,sell_tax,ownership_renounced,no_proxy,holder_count,top_holder_pct,not_mintable,liquidity_locked,liquidity_bnb,token_age_seconds,price_impact_pct,profitable
+is_not_honeypot,buy_tax,sell_tax,ownership_renounced,no_proxy,holder_count,top_holder_pct,not_mintable,liquidity_locked,liquidity_usd,token_age_seconds,price_impact_pct,profitable
 1,3.0,3.0,1,1,150,15.0,1,1,5000,120,0.5,1
 0,45.0,90.0,0,0,5,85.0,0,0,200,10,25.0,0
 ```
@@ -130,8 +135,9 @@ is_not_honeypot,buy_tax,sell_tax,ownership_renounced,no_proxy,holder_count,top_h
 ## Пайплайн обработки токена
 
 ```
-Новая пара -> Ликвидность >= 1500 BNB? -> Honeypot проверка -> Tax проверка
+Новая пара -> Ликвидность >= $1500? -> Honeypot проверка -> Tax проверка
      -> ML скоринг >= 0.7? -> ПОКУПКА -> Мониторинг позиции -> Take Profit / Stop Loss
+     -> Запись в историю -> Авто-переобучение ML каждые 50 сделок
 ```
 
 ## Рекомендации
@@ -139,5 +145,7 @@ is_not_honeypot,buy_tax,sell_tax,ownership_renounced,no_proxy,holder_count,top_h
 - Используйте приватную BSC ноду для максимальной скорости
 - Начинайте с маленьких сумм для тестирования
 - Следите за газом и slippage
-- ML модель улучшается при обучении на реальных данных ваших трейдов
+- ML модель **автоматически переобучается** на ваших реальных трейдах (каждые 50 сделок)
+- Чем дольше бот работает — тем умнее становится модель
+- Все трейды записываются в `data/trades.csv` для анализа
 - Не храните приватный ключ в открытом виде — используйте .env файл

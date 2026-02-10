@@ -21,7 +21,7 @@ FEATURE_NAMES = [
     "top_holder_pct",
     "not_mintable",
     "liquidity_locked",
-    "liquidity_bnb",
+    "liquidity_usd",
     "token_age_seconds",
     "price_impact_pct",
 ]
@@ -123,15 +123,15 @@ class TokenScorer:
     def predict(
         self,
         safety: SafetyReport,
-        liquidity_bnb: float,
+        liquidity_usd: float,
         token_age_seconds: float,
         price_impact_pct: float,
-    ) -> tuple[float, bool]:
+    ) -> tuple[float, bool, list[float]]:
         if not self._loaded:
             self.load()
 
         features = safety.to_features() + [
-            liquidity_bnb,
+            liquidity_usd,
             token_age_seconds,
             price_impact_pct,
         ]
@@ -149,15 +149,24 @@ class TokenScorer:
             dict(zip(FEATURE_NAMES, features)),
         )
 
-        return proba, is_good
+        return proba, is_good, features
 
-    def retrain(self, X: np.ndarray, y: np.ndarray):
-        logger.info("Retraining ML model with %d samples", len(X))
+    def retrain(self, X: np.ndarray, y: np.ndarray) -> float:
+        if len(X) < 10:
+            logger.warning("Not enough data to retrain (%d samples)", len(X))
+            return 0.0
+
+        logger.info("Retraining ML model with %d real trade samples", len(X))
+        wins = int(y.sum())
+        losses = len(y) - wins
+        logger.info("Training data: %d wins, %d losses", wins, losses)
+
         X_scaled = self.scaler.fit_transform(X)
         self.model.fit(X_scaled, y)
+        accuracy = self.model.score(X_scaled, y)
         self._save_model()
-        logger.info("Model retrained (accuracy: %.3f)",
-                     self.model.score(X_scaled, y))
+        logger.info("Model retrained on REAL data (accuracy: %.3f)", accuracy)
+        return accuracy
 
     def get_feature_importance(self) -> dict[str, float]:
         if self.model is None:

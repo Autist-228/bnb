@@ -33,7 +33,7 @@ Examples:
         "--min-liquidity",
         type=float,
         default=None,
-        help="Minimum liquidity in BNB (default: from .env or 1500)",
+        help="Minimum liquidity in USD (default: from .env or 1500)",
     )
     parser.add_argument(
         "--ml-score",
@@ -103,7 +103,7 @@ def main():
     if args.buy_amount is not None:
         config.buy_amount_bnb = args.buy_amount
     if args.min_liquidity is not None:
-        config.min_liquidity_bnb = args.min_liquidity
+        config.min_liquidity_usd = args.min_liquidity
     if args.ml_score is not None:
         config.ml_min_score = args.ml_score
     if args.slippage is not None:
