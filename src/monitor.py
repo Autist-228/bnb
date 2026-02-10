@@ -3,11 +3,13 @@ import logging
 import time
 from typing import Callable, Optional
 
-from web3 import AsyncWeb3
+from web3 import AsyncWeb3, AsyncHTTPProvider
 from web3.contract import AsyncContract
+from web3.middleware import ExtraDataToPOAMiddleware
 
 from src.config import (
     BotConfig,
+    BSC_PUBLIC_NODES,
     FACTORY_ABI,
     ERC20_ABI,
 )
@@ -61,7 +63,8 @@ class PairMonitor:
         self._last_block = 0
         self._seen_pairs: set = set()
         self._factory: Optional[AsyncContract] = None
-        self._backoff = 0.0
+        self._node_index = 0
+        self._rate_limit_count = 0
 
     async def start(self):
         self._factory = self.w3.eth.contract(
@@ -81,6 +84,20 @@ class PairMonitor:
         self._running = False
         logger.info("PairMonitor stopped")
 
+    def _rotate_node(self):
+        nodes = BSC_PUBLIC_NODES
+        if not nodes:
+            return
+        self._node_index = (self._node_index + 1) % len(nodes)
+        new_url = nodes[self._node_index]
+        self.w3 = AsyncWeb3(AsyncHTTPProvider(new_url))
+        self.w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+        self._factory = self.w3.eth.contract(
+            address=self.w3.to_checksum_address(self.config.pancake_factory),
+            abi=FACTORY_ABI,
+        )
+        logger.info("Switched to BSC node: %s", new_url)
+
     async def _poll_loop(self):
         consecutive_fails = 0
         while self._running:
@@ -89,18 +106,19 @@ class PairMonitor:
                 if current_block > self._last_block:
                     gap = current_block - self._last_block
                     if gap > 20:
-                        logger.warning(
-                            "Block gap too large (%d blocks), skipping to current",
-                            gap,
-                        )
                         self._last_block = current_block - 5
 
                     ok = await self._scan_blocks(self._last_block + 1, current_block)
                     if ok:
                         self._last_block = current_block
                         consecutive_fails = 0
+                        self._rate_limit_count = 0
                     else:
                         consecutive_fails += 1
+                        self._rate_limit_count += 1
+                        if self._rate_limit_count >= 5:
+                            self._rotate_node()
+                            self._rate_limit_count = 0
                         cooldown = min(2.0 * consecutive_fails, 10.0)
                         await asyncio.sleep(cooldown)
                         if consecutive_fails >= 3:
@@ -109,6 +127,7 @@ class PairMonitor:
                         continue
             except Exception as e:
                 logger.error("Poll error: %s", e)
+                self._rotate_node()
                 await asyncio.sleep(3.0)
 
             await asyncio.sleep(self.config.poll_interval_ms / 1000.0)
@@ -129,9 +148,11 @@ class PairMonitor:
 
             return True
         except Exception as e:
-            msg = str(e)
-            if "limit" in msg.lower() or "-32005" in msg or "-32000" in msg:
-                logger.debug("Rate limited [%d-%d]", from_block, to_block)
+            msg = str(e).lower()
+            is_rate_limit = any(s in msg for s in ["limit", "32005", "32000", "429", "too many"])
+            if is_rate_limit:
+                if self._rate_limit_count % 10 == 0:
+                    logger.warning("Rate limited on blocks %d-%d", from_block, to_block)
             else:
                 logger.error("Block scan error [%d-%d]: %s", from_block, to_block, e)
             return False

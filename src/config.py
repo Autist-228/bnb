@@ -5,6 +5,18 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+BSC_PUBLIC_NODES = [
+    "https://bsc.publicnode.com",
+    "https://bsc-dataseed1.binance.org",
+    "https://bsc-dataseed2.binance.org",
+    "https://bsc-dataseed3.binance.org",
+    "https://bsc-dataseed4.binance.org",
+    "https://bsc-dataseed1.defibit.io",
+    "https://bsc-dataseed2.defibit.io",
+    "https://bsc-dataseed1.ninicoin.io",
+    "https://bsc-dataseed2.ninicoin.io",
+]
+
 PANCAKE_FACTORY_V2 = "0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73"
 PANCAKE_ROUTER_V2 = "0x10ED43C718714eb63d5aA57B78B54704E256024E"
 WBNB_ADDRESS = "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"
