@@ -105,8 +105,8 @@ class PairMonitor:
                 current_block = await self.w3.eth.block_number
                 if current_block > self._last_block:
                     gap = current_block - self._last_block
-                    if gap > 20:
-                        self._last_block = current_block - 5
+                    if gap > 50:
+                        self._last_block = current_block - 10
 
                     ok = await self._scan_blocks(self._last_block + 1, current_block)
                     if ok:
@@ -116,19 +116,29 @@ class PairMonitor:
                     else:
                         consecutive_fails += 1
                         self._rate_limit_count += 1
-                        if self._rate_limit_count >= 5:
+                        if self._rate_limit_count >= 3:
                             self._rotate_node()
                             self._rate_limit_count = 0
-                        cooldown = min(2.0 * consecutive_fails, 10.0)
+                        cooldown = min(3.0 * consecutive_fails, 15.0)
                         await asyncio.sleep(cooldown)
-                        if consecutive_fails >= 3:
+                        if consecutive_fails >= 2:
+                            try:
+                                current_block = await self.w3.eth.block_number
+                            except Exception:
+                                pass
                             self._last_block = current_block
                             consecutive_fails = 0
                         continue
             except Exception as e:
-                logger.error("Poll error: %s", e)
-                self._rotate_node()
-                await asyncio.sleep(3.0)
+                msg = str(e).lower()
+                is_rate_limit = any(s in msg for s in ["limit", "32005", "429", "too many"])
+                if is_rate_limit:
+                    self._rotate_node()
+                    await asyncio.sleep(5.0)
+                else:
+                    logger.error("Poll error: %s", e)
+                    self._rotate_node()
+                    await asyncio.sleep(3.0)
 
             await asyncio.sleep(self.config.poll_interval_ms / 1000.0)
 
@@ -151,7 +161,7 @@ class PairMonitor:
             msg = str(e).lower()
             is_rate_limit = any(s in msg for s in ["limit", "32005", "32000", "429", "too many"])
             if is_rate_limit:
-                if self._rate_limit_count % 10 == 0:
+                if self._rate_limit_count % 20 == 0:
                     logger.warning("Rate limited on blocks %d-%d", from_block, to_block)
             else:
                 logger.error("Block scan error [%d-%d]: %s", from_block, to_block, e)
