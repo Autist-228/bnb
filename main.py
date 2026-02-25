@@ -1,155 +1,95 @@
+"""Solana Pump.fun Sniper Bot - Paper Trading Mode.
+
+Three strategies:
+  1. KOTH (King of the Hill) - Buy tokens at 40-65% bonding curve with momentum
+  2. VELOCITY - Detect and ride sudden buy spikes
+  3. MIGRATION - Snipe tokens at the exact graduation moment
+
+Usage:
+  python main.py --strategy koth --duration 600
+  python main.py --strategy velocity --duration 600
+  python main.py --strategy migration --duration 600
+  python main.py --strategy all --duration 600
+"""
+
 import argparse
 import asyncio
 import logging
 import sys
 
-from src.config import BotConfig
-from src.bot import SniperBot
+from src.config import Config
+from src.paper_trader import PaperTrader
 from src.utils import setup_logging
-
-logger = logging.getLogger("sniper.main")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="BNB Sniper Bot - PancakeSwap V2 + ML",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python main.py
-  python main.py --buy-amount 0.05 --min-liquidity 2000
-  python main.py --ml-score 0.8 --take-profit 150 --stop-loss 20
-  python main.py --poll-interval 50 --gas-price 7
-        """,
-    )
-
-    parser.add_argument(
-        "--buy-amount",
-        type=float,
-        default=None,
-        help="BNB amount per buy (default: from .env or 0.1)",
+        description="Pump.fun Sniper Bot - Paper Trading",
     )
     parser.add_argument(
-        "--min-liquidity",
-        type=float,
-        default=None,
-        help="Minimum liquidity in USD (default: from .env or 1500)",
+        "--strategy",
+        type=str,
+        default="all",
+        choices=["koth", "velocity", "migration", "all"],
+        help="Strategy to run (default: all)",
     )
     parser.add_argument(
-        "--ml-score",
-        type=float,
-        default=None,
-        help="Minimum ML score to buy (0.0-1.0, default: 0.7)",
-    )
-    parser.add_argument(
-        "--slippage",
-        type=float,
-        default=None,
-        help="Slippage tolerance %% (default: 12)",
-    )
-    parser.add_argument(
-        "--gas-price",
+        "--duration",
         type=int,
-        default=None,
-        help="Gas price in gwei (default: 5)",
+        default=600,
+        help="Duration in seconds (default: 600 = 10 minutes)",
     )
     parser.add_argument(
-        "--take-profit",
+        "--budget",
         type=float,
         default=None,
-        help="Take profit %% (default: 100)",
-    )
-    parser.add_argument(
-        "--stop-loss",
-        type=float,
-        default=None,
-        help="Stop loss %% (default: 30)",
-    )
-    parser.add_argument(
-        "--max-buy-tax",
-        type=float,
-        default=None,
-        help="Max buy tax %% (default: 10)",
-    )
-    parser.add_argument(
-        "--max-sell-tax",
-        type=float,
-        default=None,
-        help="Max sell tax %% (default: 10)",
-    )
-    parser.add_argument(
-        "--poll-interval",
-        type=int,
-        default=None,
-        help="Polling interval in ms (default: 100)",
-    )
-    parser.add_argument(
-        "--paper",
-        action="store_true",
-        help="Paper trading mode (no real transactions)",
-    )
-    parser.add_argument(
-        "--collect-only",
-        action="store_true",
-        help="Data collection mode: record ALL tokens to CSV, no trades",
+        help="Budget in USD (default: from .env or 50)",
     )
     parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug logging",
     )
-
     return parser.parse_args()
 
 
-def main():
+def main() -> None:
     args = parse_args()
 
-    log_level = logging.DEBUG if args.debug else logging.INFO
-    setup_logging(log_level)
+    level = logging.DEBUG if args.debug else logging.INFO
+    setup_logging(level)
 
-    config = BotConfig()
+    logger = logging.getLogger("sniper.main")
 
-    if args.buy_amount is not None:
-        config.buy_amount_bnb = args.buy_amount
-    if args.min_liquidity is not None:
-        config.min_liquidity_usd = args.min_liquidity
-    if args.ml_score is not None:
-        config.ml_min_score = args.ml_score
-    if args.slippage is not None:
-        config.slippage_percent = args.slippage
-    if args.gas_price is not None:
-        config.gas_price_gwei = args.gas_price
-    if args.take_profit is not None:
-        config.take_profit_percent = args.take_profit
-    if args.stop_loss is not None:
-        config.stop_loss_percent = args.stop_loss
-    if args.max_buy_tax is not None:
-        config.max_buy_tax = args.max_buy_tax
-    if args.max_sell_tax is not None:
-        config.max_sell_tax = args.max_sell_tax
-    if args.poll_interval is not None:
-        config.poll_interval_ms = args.poll_interval
-    if args.paper:
-        config.paper_trading = True
-    if args.collect_only:
-        config.collect_only = True
-        config.paper_trading = True
+    config = Config()
+    if args.budget is not None:
+        config.BUDGET_USD = args.budget
 
-    if not config.paper_trading:
-        if not config.private_key:
-            logger.error("PRIVATE_KEY not set! Check your .env file.")
-            sys.exit(1)
-        if not config.wallet_address:
-            logger.error("WALLET_ADDRESS not set! Check your .env file.")
-            sys.exit(1)
+    if args.strategy == "all":
+        strategies = ["koth", "velocity", "migration"]
+    else:
+        strategies = [args.strategy]
 
-    bot = SniperBot(config)
+    logger.info("Pump.fun Sniper Bot - PAPER TRADING MODE")
+    logger.info(
+        "Strategies: %s | Duration: %ds | Budget: $%.2f (%.4f SOL)",
+        ", ".join(s.upper() for s in strategies),
+        args.duration,
+        config.BUDGET_USD,
+        config.budget_sol,
+    )
+
+    trader = PaperTrader(
+        config=config,
+        strategies=strategies,
+        duration_seconds=args.duration,
+    )
 
     try:
-        asyncio.run(bot.start())
+        report = asyncio.run(trader.run())
+        print(report)
     except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
+        logger.info("Stopped by user")
     except Exception as e:
         logger.critical("Fatal error: %s", e, exc_info=True)
         sys.exit(1)

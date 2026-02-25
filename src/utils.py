@@ -1,7 +1,7 @@
+"""Utility functions."""
+
 import logging
 import sys
-from datetime import datetime
-
 from colorama import Fore, Style, init
 
 init(autoreset=True)
@@ -13,66 +13,47 @@ class ColoredFormatter(logging.Formatter):
         logging.INFO: Fore.GREEN,
         logging.WARNING: Fore.YELLOW,
         logging.ERROR: Fore.RED,
-        logging.CRITICAL: Fore.RED + Style.BRIGHT,
-    }
-
-    KEYWORDS = {
-        "[BUY SIGNAL]": Fore.GREEN + Style.BRIGHT,
-        "[BOUGHT]": Fore.GREEN + Style.BRIGHT,
-        "[SOLD]": Fore.CYAN + Style.BRIGHT,
-        "[AUTO-SELL]": Fore.CYAN + Style.BRIGHT,
-        "[SKIP]": Fore.YELLOW,
-        "[PASS]": Fore.GREEN,
-        "[ANALYZE]": Fore.BLUE,
-        "[BUY FAILED]": Fore.RED + Style.BRIGHT,
-        "HONEYPOT": Fore.RED + Style.BRIGHT,
-        "NEW PAIR": Fore.MAGENTA + Style.BRIGHT,
+        logging.CRITICAL: Fore.MAGENTA,
     }
 
     def format(self, record: logging.LogRecord) -> str:
         color = self.COLORS.get(record.levelno, "")
-        timestamp = datetime.fromtimestamp(record.created).strftime("%H:%M:%S.%f")[:-3]
-
+        # Color the tag/name
+        name = record.name.split(".")[-1].upper()
+        timestamp = self.formatTime(record, "%H:%M:%S")
         msg = record.getMessage()
-        for keyword, kw_color in self.KEYWORDS.items():
-            if keyword in msg:
-                msg = msg.replace(keyword, f"{kw_color}{keyword}{Style.RESET_ALL}")
-                break
-
-        return (
-            f"{Fore.WHITE}{timestamp}{Style.RESET_ALL} "
-            f"{color}{record.levelname:<8}{Style.RESET_ALL} "
-            f"{Fore.BLUE}{record.name:<25}{Style.RESET_ALL} "
-            f"{msg}"
-        )
+        return f"{Fore.WHITE}{timestamp}{Style.RESET_ALL} [{color}{name}{Style.RESET_ALL}] {msg}"
 
 
-def setup_logging(level: int = logging.INFO):
+def setup_logging(level: int = logging.INFO) -> None:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(ColoredFormatter())
     root = logging.getLogger()
     root.setLevel(level)
-
-    for handler in root.handlers[:]:
-        root.removeHandler(handler)
-
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(level)
-    console_handler.setFormatter(ColoredFormatter())
-    root.addHandler(console_handler)
-
-    logging.getLogger("web3").setLevel(logging.WARNING)
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    logging.getLogger("asyncio").setLevel(logging.WARNING)
+    root.handlers.clear()
+    root.addHandler(handler)
+    # Suppress noisy websocket client debug logs
+    logging.getLogger("websockets").setLevel(logging.WARNING)
+    logging.getLogger("websockets.client").setLevel(logging.WARNING)
 
 
-def format_bnb(amount: float) -> str:
-    return f"{amount:.4f} BNB"
+def sol_to_lamports(sol: float) -> int:
+    return int(sol * 1_000_000_000)
 
 
-def format_percentage(value: float) -> str:
-    return f"{value:.2f}%"
+def lamports_to_sol(lamports: int) -> float:
+    return lamports / 1_000_000_000
 
 
-def short_address(address: str) -> str:
-    if len(address) < 10:
-        return address
-    return f"{address[:6]}...{address[-4:]}"
+def format_sol(sol: float) -> str:
+    return f"{sol:.6f} SOL"
+
+
+def format_usd(usd: float) -> str:
+    return f"${usd:.2f}"
+
+
+def short_addr(addr: str) -> str:
+    if len(addr) <= 10:
+        return addr
+    return f"{addr[:4]}..{addr[-4:]}"
