@@ -4,6 +4,7 @@ Detect sudden bursts of buying activity on a token and ride the wave.
 """
 
 import logging
+import time
 from src.config import Config
 from src.token_tracker import TokenInfo
 from src.strategies.base import BaseStrategy
@@ -36,42 +37,48 @@ class VelocityStrategy(BaseStrategy):
         if curve > 85:
             return
 
-        # Need enough trade history to measure velocity
-        if len(token.trade_history) < 5:
+        # Token must be old enough to have meaningful history (3 min default)
+        token_age = time.time() - token.created_at
+        if token_age < self.config.VELOCITY_MIN_TOKEN_AGE_SECONDS:
             return
 
-        # --- Detect velocity spike ---
+        # Need enough trade history to measure velocity reliably
+        if len(token.trade_history) < self.config.VELOCITY_MIN_TRADES:
+            return
+
+        # --- Detect velocity spike (REAL spike, no fallback) ---
         spike_ratio = token.velocity_spike(
             window=self.config.VELOCITY_WINDOW_SECONDS,
             lookback=300,
         )
 
+        # spike_ratio == 0 means no older data to compare = NOT a spike
         if spike_ratio < self.config.VELOCITY_SPIKE_MULTIPLIER:
             return
 
-        # Recent velocity in absolute terms
+        # Recent velocity in absolute terms - must be significant
         recent_vel = token.velocity_sol(self.config.VELOCITY_WINDOW_SECONDS)
-        if recent_vel < 0.1:  # At least 0.1 SOL in recent window
+        if recent_vel < 0.5:  # At least 0.5 SOL in recent window
             return
 
         # --- Filters ---
 
-        # Unique buyers
+        # Unique buyers - need strong community
         n_buyers = len(token.unique_buyers)
         if n_buyers < self.config.VELOCITY_MIN_UNIQUE_BUYERS:
             logger.debug(
-                "[VELOCITY] SKIP $%s - only %d buyers",
-                token.symbol or token.mint[:8], n_buyers,
+                "[VELOCITY] SKIP $%s - only %d buyers (need %d+)",
+                token.symbol or token.mint[:8], n_buyers, self.config.VELOCITY_MIN_UNIQUE_BUYERS,
             )
             return
 
         # Check it's organic - not one whale
-        # Recent buys should be from multiple wallets
+        # Recent buys should be from multiple wallets (at least 5)
         recent_buyers = set()
-        for trade in token.trade_history[-10:]:
+        for trade in token.trade_history[-15:]:
             if trade.is_buy:
                 recent_buyers.add(trade.user)
-        if len(recent_buyers) < 3:
+        if len(recent_buyers) < 5:
             logger.debug(
                 "[VELOCITY] SKIP $%s - only %d recent unique buyers (whale?)",
                 token.symbol or token.mint[:8], len(recent_buyers),
@@ -86,6 +93,15 @@ class VelocityStrategy(BaseStrategy):
             )
             return
 
+        # Buy/sell ratio check - buys must dominate
+        buy_sell_ratio = token.total_buys / max(1, token.total_sells)
+        if buy_sell_ratio < 1.5:
+            logger.debug(
+                "[VELOCITY] SKIP $%s - buy/sell ratio %.1f (need 1.5+)",
+                token.symbol or token.mint[:8], buy_sell_ratio,
+            )
+            return
+
         self.tokens_passed_filter += 1
 
         # --- Execute buy ---
@@ -93,7 +109,8 @@ class VelocityStrategy(BaseStrategy):
             f"SPIKE {spike_ratio:.1f}x | "
             f"vel {recent_vel:.2f} SOL/min | "
             f"curve {curve:.0f}% | "
-            f"{n_buyers} buyers"
+            f"{n_buyers} buyers | "
+            f"age {token_age:.0f}s"
         )
         self._execute_buy(token, reason)
 

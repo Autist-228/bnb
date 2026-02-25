@@ -98,8 +98,8 @@ class TokenInfo:
             return 0.0
         avg_velocity = older_total / avg_period if avg_period > 0 else 0.0
         if avg_velocity <= 0:
-            # No older data to compare - return high but finite ratio
-            return 10.0 if recent > 0 else 0.0
+            # No older data to compare - can't determine spike
+            return 0.0
         return recent / avg_velocity
 
 

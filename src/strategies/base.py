@@ -216,21 +216,23 @@ class BaseStrategy:
         """Force-close positions that have timed out (no recent data)."""
         for pos in list(self.positions):
             if pos.hold_time >= self.config.TIMEOUT_SECONDS:
-                # Create a dummy token for sell
-                dummy = TokenInfo(mint=pos.mint, symbol=pos.symbol)
-                dummy.virtual_sol_reserves = int(pos.current_price * pos.current_price) if pos.current_price else 0
-                dummy.virtual_token_reserves = 1
+                # Use last known P&L instead of assuming flat -20%
                 pos.exit_price = pos.current_price
-                pos.exit_sol = pos.entry_sol * 0.8  # assume 20% loss on timeout
+                if pos.entry_price > 0 and pos.current_price > 0:
+                    exit_sol = (pos.current_price / pos.entry_price) * pos.entry_sol
+                else:
+                    exit_sol = pos.entry_sol * 0.9  # fallback if no price data
+                pos.exit_sol = exit_sol
                 pos.exit_time = time.time()
-                pos.exit_reason = f"TIMEOUT_STALE ({pos.hold_time:.0f}s)"
+                pnl_pct = ((exit_sol / pos.entry_sol) - 1) * 100 if pos.entry_sol > 0 else 0
+                pos.exit_reason = f"TIMEOUT_STALE ({pos.hold_time:.0f}s, {pnl_pct:+.1f}%)"
                 pos.is_closed = True
-                self.available_sol += pos.exit_sol
+                self.available_sol += exit_sol
                 self.positions.remove(pos)
                 self.closed_positions.append(pos)
                 logger.info(
-                    "[%s] FORCE_CLOSE $%s | timeout with stale data",
-                    self.name, pos.symbol,
+                    "[%s] FORCE_CLOSE $%s | timeout with stale data | %+.4f SOL",
+                    self.name, pos.symbol, exit_sol - pos.entry_sol,
                 )
 
     def evaluate(self, token: TokenInfo) -> None:

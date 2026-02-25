@@ -21,24 +21,27 @@ class Config:
     # Trade params
     BUY_AMOUNT_SOL: float = float(os.getenv("BUY_AMOUNT_SOL", "0.02"))
     TAKE_PROFIT_PCT: float = float(os.getenv("TAKE_PROFIT_PCT", "100"))
-    STOP_LOSS_PCT: float = float(os.getenv("STOP_LOSS_PCT", "30"))
+    STOP_LOSS_PCT: float = float(os.getenv("STOP_LOSS_PCT", "45"))
     TIMEOUT_SECONDS: int = int(os.getenv("TIMEOUT_SECONDS", "300"))
     MAX_POSITIONS: int = int(os.getenv("MAX_POSITIONS_PER_STRATEGY", "5"))
 
     # KOTH strategy
-    KOTH_MIN_CURVE_PCT: float = float(os.getenv("KOTH_MIN_CURVE_PCT", "40"))
+    KOTH_MIN_CURVE_PCT: float = float(os.getenv("KOTH_MIN_CURVE_PCT", "50"))
     KOTH_MAX_CURVE_PCT: float = float(os.getenv("KOTH_MAX_CURVE_PCT", "65"))
-    KOTH_MIN_UNIQUE_BUYERS: int = int(os.getenv("KOTH_MIN_UNIQUE_BUYERS", "12"))
-    KOTH_MIN_VELOCITY: float = float(os.getenv("KOTH_MIN_VELOCITY", "0.3"))
+    KOTH_MIN_UNIQUE_BUYERS: int = int(os.getenv("KOTH_MIN_UNIQUE_BUYERS", "25"))
+    KOTH_MIN_VELOCITY: float = float(os.getenv("KOTH_MIN_VELOCITY", "15.0"))
+    KOTH_MIN_BUY_SELL_RATIO: float = float(os.getenv("KOTH_MIN_BUY_SELL_RATIO", "2.0"))
 
     # Velocity strategy
     VELOCITY_SPIKE_MULTIPLIER: float = float(os.getenv("VELOCITY_SPIKE_MULTIPLIER", "3.0"))
-    VELOCITY_MIN_CURVE_PCT: float = float(os.getenv("VELOCITY_MIN_CURVE_PCT", "10"))
-    VELOCITY_MIN_UNIQUE_BUYERS: int = int(os.getenv("VELOCITY_MIN_UNIQUE_BUYERS", "8"))
+    VELOCITY_MIN_CURVE_PCT: float = float(os.getenv("VELOCITY_MIN_CURVE_PCT", "15"))
+    VELOCITY_MIN_UNIQUE_BUYERS: int = int(os.getenv("VELOCITY_MIN_UNIQUE_BUYERS", "15"))
+    VELOCITY_MIN_TOKEN_AGE_SECONDS: int = int(os.getenv("VELOCITY_MIN_TOKEN_AGE_SECONDS", "180"))
+    VELOCITY_MIN_TRADES: int = int(os.getenv("VELOCITY_MIN_TRADES", "15"))
     VELOCITY_WINDOW_SECONDS: int = int(os.getenv("VELOCITY_WINDOW_SECONDS", "60"))
 
     # Migration strategy
-    MIGRATION_HOLD_SECONDS: int = int(os.getenv("MIGRATION_HOLD_SECONDS", "300"))
+    MIGRATION_HOLD_SECONDS: int = int(os.getenv("MIGRATION_HOLD_SECONDS", "120"))
 
     @property
     def budget_sol(self) -> float:
